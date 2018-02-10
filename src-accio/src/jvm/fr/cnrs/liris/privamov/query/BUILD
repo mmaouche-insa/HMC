@@ -1,0 +1,26 @@
+scala_library(
+  name='query',
+  dependencies=[
+    'src/jvm/fr/cnrs/liris/common/geo:json',
+    'src/jvm/fr/cnrs/liris/common/geo:geo',
+    'src/jvm/com/google/common/geometry',
+    '3rdparty/jvm:scala-time',
+    '3rdparty/jvm/com/twitter/finatra:http',
+    '3rdparty/jvm/com/twitter/bijection:util',
+    '3rdparty/jvm/com/sksamuel/elastic4s:core',
+  ],
+  sources=globs('*.scala')
+)
+
+jvm_binary(
+  name='bin',
+  dependencies=[
+    '3rdparty/jvm:logback',
+    ':query',
+  ],
+  resources=[
+    'src/resources/fr/cnrs/liris/privamov/svc:logback',
+  ],
+  main='fr.cnrs.liris.privamov.query.PrivamovQueryServerMain',
+  basename='privamov-query',
+)

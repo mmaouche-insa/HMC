@@ -1,0 +1,46 @@
+html, body {
+    height: 100%;
+}
+
+footer {
+    margin-top: 15px;
+    border-top: 1px solid #eee;
+    padding: 10px;
+    text-align: center;
+}
+
+footer a {
+    margin-left: 10px;
+}
+
+h1 {
+    font-size: 32px;
+    margin-bottom: 25px;
+    margin-top: 0;
+}
+
+.popover {
+    max-width: 100%;
+}
+
+.location-map {
+    height: 550px;
+}
+
+.location-series {
+    height: 150px;
+    width: 100%;
+}
+
+h2 {
+    margin-bottom: 25px;
+}
+
+#period {
+    font-weight: bold;
+    text-align: center;
+}
+
+.statistics {
+    font-size: 0.8em;
+}

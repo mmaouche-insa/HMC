@@ -1,0 +1,679 @@
+/*
+ * Accio is a program whose purpose is to study location privacy.
+ * Copyright (C) 2016 Vincent Primault <vincent.primault@liris.cnrs.fr>
+ *
+ * Accio is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Accio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Accio.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+// @TODO NEED TESTING
+package fr.cnrs.liris.privamov.ops
+import scala.util.Random
+import com.google.common.geometry.{S1Angle, S2CellId}
+import com.google.inject.Inject
+import fr.cnrs.liris.accio.core.api._
+import fr.cnrs.liris.common.geo._
+import fr.cnrs.liris.common.util.Requirements._
+import fr.cnrs.liris.privamov.core.model.{Event, Trace}
+import fr.cnrs.liris.privamov.core.sparkle.{DataFrame, SparkleEnv}
+import org.joda.time.Instant
+import sun.java2d.pipe.hw.AccelDeviceEventNotifier
+
+import scala.Predef.intArrayOps
+import scala.collection.immutable
+import scala.collection.mutable.ListBuffer
+import scala.reflect.internal.util.StringOps
+
+@Op(
+  category = "LPPM",
+  help = "Transforms a dataset into a protected dataset using a knowledge of user past mobility")
+class HeatMapConfusionOp @Inject()(env: SparkleEnv) extends Operator[HeatMapConfusionIn, HeatMapConfusionOut] with SparkleOperator {
+
+  override def execute(in: HeatMapConfusionIn, ctx: OpContext): HeatMapConfusionOut = {
+    //println("")
+    // println("Start Confusion")
+    val dstrain = read(in.train, env)
+    val dstest = read(in.test, env)
+
+
+    val (p1, p2) = (LatLng.degrees(in.lat1, in.lng1).toPoint, LatLng.degrees(in.lat2, in.lng2).toPoint)
+    val (rdstrain, ratio1) = restrictArea(dstrain, p1, p2)
+    val (rdstest, ratio2) = restrictArea(dstest, p1, p2)
+
+    val dimensions = computeMatricesSize(p1, p2, in.cellSize)
+
+    val train = formSingleMatrices(rdstrain, dimensions, in.cellSize)
+    val test = formSingleMatrices(rdstest, dimensions, in.cellSize)
+
+
+    val nbIndicestrain = train.map(c => c._2.indices.size).sum
+    val nbIndicestest = test.map(c => c._2.indices.size).sum
+
+    val rnd = new Random(ctx.seed)
+    val seeds = dstrain.keys.map(id => (id , rnd.nextLong())).toMap
+    val output = test.par.map { case (id, mat) => id -> transform(id, mat, train, -51, in) }.seq
+    val newtest = output.map { case (id, out) => id -> out._1 }
+    val newACFscore = output.map { case (id, out) => id -> out._2 }
+    val worstACFscore = output.map { case (id, out) => id -> out._3 }
+    val change = output.map { case (id, out) => id -> out._5 }
+    val matches = output.map { case (id, out) => id -> out._6 }
+    val statistics = output.map { case (id, out) => id -> ("" + out._2.toString + "=" + out._3.toString + "=" + out._4.toString + "=" + out._5.toString + "=" + out._6.toString) }.toMap
+
+
+    val protectedDataset = rdstest.map { t =>
+      if (newtest.contains(t.user)) createProtectedTraceReinforce(t, newtest(t.user), dimensions._3, in.cellSize, seeds(t.id)) else t
+    }
+    HeatMapConfusionOut(statistics, newACFscore.values.sum / newACFscore.values.size, matches, write(protectedDataset, ctx.workDir))
+  }
+
+
+  override def isUnstable(in: HeatMapConfusionIn): Boolean = true
+
+
+ /* def createProtectedTrace(tr: Trace, tprime: MatrixLight[Int], up: Point, cellSize: Distance, seed: Long) = {
+    val eventsMap = traceMatrixCutting(tr, up, cellSize)
+    // println(s" user =  ${tr.id}")
+    val rnd = new Random(seed)
+    val seedReinforce = rnd.nextLong()
+    val seedAdd = rnd.nextLong()
+    val reinforcedCellEvents = eventsMap.flatMap {
+      p => constructSetEvent(p._2, tprime(p._1._1, p._1._2), seedReinforce)
+    }
+    val cellToAdd = tprime.indices.diff(eventsMap.keySet)
+
+    val addedEvents = tprime.indices.diff(eventsMap.keySet).flatMap {
+      ind =>
+        fillCell(tr.user, ind, null, null, tprime(ind._1, ind._2), up, cellSize, seedAdd)
+
+    }
+    Trace(tr.id, reinforcedCellEvents ++ addedEvents)
+  }*/
+
+  def createProtectedTraceRandom(tr: Trace, tprime: MatrixLight[Int], up: Point, cellSize: Distance, seed: Long) = {
+    val eventsMap = traceMatrixCutting(tr, up, cellSize)
+    // println(s" user =  ${tr.id}")
+    val rnd = new Random(seed)
+    val seedReinforce = rnd.nextLong()
+    val seedAdd = rnd.nextLong()
+    val reinforcedCellEvents = eventsMap.flatMap {
+      p => constructSetEvent(p._2, tprime(p._1._1, p._1._2), seedReinforce)
+    }
+    val cellToAdd = tprime.indices.diff(eventsMap.keySet)
+
+    val addedEvents = tprime.indices.diff(eventsMap.keySet).flatMap {
+      ind =>
+        fillCell(tr.user, ind, null, null, tprime(ind._1, ind._2), up, cellSize, seedAdd)
+
+    }
+    Trace(tr.id, reinforcedCellEvents ++ addedEvents)
+  }
+  def createProtectedTraceReinforce(tr: Trace, tprime: MatrixLight[Int], up: Point, cellSize: Distance, seed: Long) = {
+    val eventsMap = traceMatrixCutting(tr, up, cellSize)
+    // println(s" user =  ${tr.id}")
+    val rnd = new Random(seed)
+    val seedReinforce = rnd.nextLong()
+    val seedAdd = rnd.nextLong()
+    val reinforcedCellEvents = eventsMap.flatMap {
+      p => constructSetEvent(p._2, tprime(p._1._1, p._1._2), seedReinforce)
+    }
+    Trace(tr.id, reinforcedCellEvents)
+  }
+
+  /*def fillCellWithOtherUsers(user : String, ind : (Int,Int), other : Trace, up : Point, cellSize : Distance , seed : Long ) ={
+    val allCut = traceMatrixCutting(other, up ,cellSize)
+    val eventsToInclude = allCut.getOrElse(ind,default = Seq[Event]())
+    eventsToInclude.map( e => Event(user, e.point , e.time))
+  }*/
+
+  /*def fillableCell(user: String, inds: Set[(Int, Int)], ds: DataFrame[Trace],up : Point,cellSize : Distance) = {
+   val v =  ds.map { t =>
+     val fillableCells =  inds.map(ind => ind -> canFill(ind, t,up,cellSize)).filter(p => p._2)
+     val nbCells = fillableCells.size
+     (t, nbCells , fillableCells)
+    }.toArray.sortWith((l,r) => l._2 > r._2)
+  }*/
+
+ /* def canFill(ind : (Int,Int) , t : Trace,up : Point,cellSize : Distance) = {
+    traceMatrixCutting(t, up ,cellSize).contains(ind)
+  }*/
+
+/*def fillCell(user: String, ind :(Int,Int),n : Int, up : Point,cellSize : Distance , seed : Long) : Seq[Event]={
+
+}*/
+
+  def fillCell(user : String , ind : (Int,Int), startCell : Seq[Event] , endCell : Seq[Event], n : Int , up : Point , cellSize : Distance , seed : Long) : Seq[Event] = {
+    //val startEvent = startCell.last
+    //val endEvent = endCell.head
+    val rnd = new Random(seed)
+    val (px , py ) = cellSmallestPoint(ind,up,cellSize)
+ ( 1 to n ).map(k => Event(user, Point(px + rnd.nextDouble()*cellSize.meters , py + rnd.nextDouble()*cellSize.meters), new Instant()) )
+
+  }
+
+/*  def getTraceSlice(ind : (Int,Int),up : Point , cellSize : Distance, t : Trace)= {
+    val events = t.events
+    var chunkList = Seq[Seq[Event]]()
+    var newChunk = true
+    t.events.foreach{
+      e =>
+       val in =  isInCell(e.point,ind,up,cellSize)
+        if(in){
+          if(newChunk)
+        }
+    }
+  }*/
+
+ /* def getTimeGaps(t : Trace , k : Int,min : Long)={
+   var gaps = Seq[(Long,Instant,Instant)]()
+    val events = t.events.sortBy(_.time)
+    for(i <- events.indices.tail){
+      val e1 = events(i-1)
+      val e2 = events(i)
+      val dt = e2.time.getMillis - e1.time.getMillis
+      if(min == -1 || dt > min) {
+        gaps = (gaps :+ (dt, e1.time, e2.time)).sortBy(_._1).reverse
+        if (gaps.size > k) gaps = gaps.slice(0, k)
+      }
+    }
+    gaps
+  }*/
+
+  /*def fillCellFromTrain(user : String , ind : (Int,Int),  n : Int , up : Point , cellSize : Distance , seed : Long) : Seq[Event] = {
+
+  }*/
+
+
+    /*
+      def filleCellCurve(user : String , ind : (Int,Int), startCell : Seq[Event] , n : Int , up : Point , cellSize : Distance , seed : Long) : Seq[Event] = {
+        val rnd = new Random(seed)
+        val cE1 = startCell.sortBy(e => e.point.distance(tupleToPoint(cellCenter(ind,up,cellSize)))).head
+        val cE2 = startCell.diff(Seq(cE1)).sortBy(e => e.point.distance(tupleToPoint(cellCenter(ind,up,cellSize)))).head
+        val (e1,e2) = if(cE1.time.isBefore(cE2.time)) (cE1,cE2) else (cE2,cE1)
+        val (t1,t2) = (e1.time.getMillis,e2.time.getMillis)
+        val dt = (t2 - t1)/(n+1)
+        val r = cellSize/2
+        val dr = r/(2*n)
+        var positions = Set[Event]()
+        val angleId = 0 to n
+        val dang = 180.0 / n
+        val angle = S1Angle.degrees(dang)
+        var old = tupleToPoint(cellCenter(ind,up,cellSize))
+        for(ang <- angleId){
+           val angle = S1Angle.degrees(dang)
+           val noiseX = (r.meters/100)*rnd.nextDouble()
+           val noiseY = (r.meters/100)*rnd.nextDouble()
+          old =  old.translate(angle,r) + Point(noiseX,noiseY)
+           positions = positions :+  Event(user, Point(px + rnd.nextDouble()*cellSize.meters , py + rnd.nextDouble()*cellSize.meters), new Instant()) )
+
+        }
+
+         for(di <- ordx){
+           for(dj <- ordx){
+
+           }
+         }
+
+
+      }
+    */
+
+  def cellSmallestPoint(ind : (Int,Int), up : Point , cellSize : Distance) = cellCornerLeftUp(ind, up , cellSize)
+  def cellCornerLeftUp(ind : (Int,Int), up : Point , cellSize : Distance) = (up.x + ind._2 * cellSize.meters , up.y + ind._1 * cellSize.meters)
+  def cellCornerLeftDown(ind : (Int,Int), up : Point , cellSize : Distance) = (up.x + ind._2 * cellSize.meters , up.y + (ind._1+1) * cellSize.meters)
+  def cellCornerRightDown(ind : (Int,Int), up : Point , cellSize : Distance) = (up.x + (ind._2+1) * cellSize.meters , up.y + (ind._1+1) * cellSize.meters)
+  def cellCornerRightUp(ind : (Int,Int), up : Point , cellSize : Distance) = (up.x + (ind._2+1) * cellSize.meters , up.y + ind._1 * cellSize.meters)
+
+  def cellCenter(ind : (Int,Int), up : Point , cellSize : Distance) = {
+    val (p1x,p1y) = cellCornerLeftUp(ind,up,cellSize)
+    val (p2x,p2y) = cellCornerRightDown(ind,up,cellSize)
+    ((p1x + p2x)/2 , (p1y + p2y)/2)
+  }
+  def  tupleToPoint( coordinate : (Double, Double)) = Point(coordinate._1,coordinate._2)
+
+  def isInCell( a : Point,ind : (Int,Int), up : Point , cellSize : Distance) = BoundingBox(tupleToPoint(cellCornerLeftUp(ind,up,cellSize)),tupleToPoint(cellCornerRightDown(ind,up,cellSize))).contains(a)
+
+
+
+  def constructSetEvent(initialSet : Seq[Event], n : Int,seed : Long) = {
+    var positions = initialSet
+    while(positions.size < n){
+      positions = createDoublePosition(positions)
+    }
+ randomlyChoose(positions,n,seed)
+  }
+
+
+
+
+  def randomlyChoose(available : Seq[Event],  n : Int,seed : Long) = {
+    require(available.size >= n)
+    var taken = Seq[Event]()
+    val indices = available.indices.to[ListBuffer]
+    val randomGenerator = new Random(seed)
+    while(taken.size < n ){
+       val rnd = randomGenerator.nextInt(indices.size)
+      val ind = indices(rnd)
+      val e = available(ind)
+       indices.remove(rnd)
+      taken = taken :+ e
+    }
+   taken
+  }
+  def createDoublePosition(in : Seq[Event]) = {
+    var positions = Seq[Event]()
+    val events = 
+    if(in.size == 1) {
+      val e = in.head
+      val p = e.point 
+      val newP = p.translate(S1Angle.degrees(30),new Distance(5))
+      val newInstant =  new Instant(e.time.getMillis+5000)
+      val eprime = Event(e.user,newP,newInstant)
+      in :+ eprime
+    }else in
+    for(i <- events.indices.tail){
+      val e1 = events(i - 1)
+      val e2 = events(i)
+      val newP = new Point((e1.point.x + e2.point.x)/2, (e1.point.y + e2.point.y)/2)
+      val i1 = e1.time
+      val i2 = e2.time
+      val newInstant =  new Instant((i1.getMillis+i2.getMillis)/2)
+      positions = positions  :+  e1
+      positions = positions  :+  Event(e1.user,newP,newInstant)
+    }
+    positions = positions  :+  events.last
+
+    positions
+  }
+  def traceMatrixCutting(tr : Trace, up : Point,cellSize : Distance) = {
+    var output  = immutable.Map[(Int,Int),Seq[Event]]()
+    for (e <- tr.events) {
+      val p = e.point
+      val j = math.floor((p.x - up.x) / cellSize.meters).toInt
+      val i = math.floor((p.y - up.y) / cellSize.meters).toInt
+      val cellEvent = output.getOrElse((i,j), default = Seq[Event]())
+      output += (i,j) -> (cellEvent :+ e)
+    }
+    output
+  }
+
+  def restrictArea(ds: DataFrame[Trace], p1: Point, p2: Point): (DataFrame[Trace], Double) = {
+    // Prepare the restrictive box
+    val bounder = BoundingBox(p1, p2)
+    // Restrict the tracers to the region.
+    val output: DataFrame[Trace] = ds.map { t =>
+      val newt = t.filter { e => bounder.contains(e.point) }
+      newt
+    }
+    var nbTot = 0L
+    var nbTaken = 0L
+    ds.foreach(t => nbTot += t.events.size)
+    output.foreach(t => nbTaken += t.events.size)
+    val ratio = nbTaken.toDouble / nbTot.toDouble
+    //println(s"ratio = $ratio, nbtaken = $nbTaken ,  nbtot = $nbTot  ,   outcount =  ${output.count().toDouble}  ,  ds count = ${ds.count().toDouble}")
+    //ratio = output.count().toDouble/ds.count().toDouble
+    (output, ratio)
+  }
+  private def transform(user : String , mat_k : MatrixLight[Int], train : immutable.Map[String,MatrixLight[Int]], distanceType : Int,in: HeatMapConfusionIn)  = {
+
+    val (matche , candidate ) = bestMatch(user,mat_k,train,distanceType)
+    if(matche != user)  (mat_k,1.0,1.0,matche,false,matche)
+    else {
+      val t = mat_k
+      // println(s" start indices = ${t.indices.size}")
+      val u = train(matche)
+      val v = train(candidate)
+      val up = u.proportional
+      val vp = v.proportional
+      var it = 0
+      var realit = 0
+      val ITMAX = in.itmax
+      var changed = false
+      var tprime = t
+      var best = v
+      var stop = false
+      while (it < ITMAX && !stop) {
+        //  val t0 = System.nanoTime()
+        tprime = oneStepTransformation(tprime, vp, up)
+        //val t1 = System.nanoTime()
+        // println(s"Time =  ${(t1-t0)/1000} ")
+        val tp = tprime.proportional
+        val dtu = DistanceUtils.d(tp, up, -51)
+        val dtv = DistanceUtils.d(tp, vp, -51)
+        val utbest = areaCoverageUnknown(t, best)._3
+        val uttprime = areaCoverageUnknown(t, tprime)._3
+        // println(s"---- $dtu > $dtv  &&  $uttprime > $utbest    ---  ${tprime.indices.size}  -- ${tprime.sum} --  ${tprime.data.count(p => p._2 != 0)}")
+        println(s"$user,$realit,$dtu,$dtv,$uttprime,$utbest,${tprime.indices.size},${tprime.sum}")
+
+        if (dtu > dtv && uttprime > utbest) {
+          best = tprime
+          changed = true
+          it = 0
+        }
+        it = it + 1
+        realit = realit + 1
+        if (utbest > 0.99 && dtu > dtv) stop = true
+      }
+      val utbest = areaCoverageUnknown(t, best)._3
+      val uttprime = areaCoverageUnknown(t, tprime)._3
+      if(utbest > 1E-4) (best, areaCoverageUnknown(t, best)._3, areaCoverageUnknown(t, v)._3, candidate ,changed,matche)
+      else (mat_k,1.0,0.0,candidate,false,matche)
+    }
+  }
+  /*
+  private def oneStepTransformationLight( t : MatrixLight[Int],v : MatrixLight[Int], u : MatrixLight[Int]): MatrixLight[Int] ={
+    val nbPoints = t.sum
+    val tp = t.proportional
+    val up = u.proportional
+    val vp = v.proportional
+    // cells to modify
+       val rmCells = t.indices.intersect(u.indices).diff(v.indices)  //  T and U and  not V
+       val addCells = v.indices.filter(pair => !(t.indices.contains(pair) || u.indices.contains(pair)))  // Not T and NOT U and V
+       val reinfCells = t.indices.intersect(v.indices).diff(u.indices)
+
+    // modification weights
+    val add = addCells.map{case (i,j) => (i,j) -> t(i,j)*u(i,j)*(1-v(i,j))}
+    val rm = addCells.map{case (i,j) => (i,j) -> t(i,j)*u(i,j)*(1-v(i,j))}
+
+
+    var tprime = addPointsCells(t,add,nbPoints,addCells)
+    tprime = addPoints(t,reinf,nbPoints)
+    tprime = rmPoints(tprime,rm,nbPoints)
+    matrixToInt(tprime.proportional,nbPoints)
+  }
+  private def addPointsCells( t : MatrixLight[Int],add : MatrixLight[Double], n : Int,cells : Set[(Int,Int)]) : MatrixLight[Int] = {
+    t.transformCells(cells,{( ind : (Int,Int),v : Int )=> v + math.floor(add(ind._1,ind._2)*n).toInt})
+  }
+  private def rmPointsCells( t : MatrixLight[Int], rm : MatrixLight[Double], n : Int,cells : Set[(Int,Int)]) : MatrixLight[Int] = {
+    t.transformCells(cells,{ ( ind : (Int,Int),v : Int )=> math.max(0,v - math.floor(rm(ind._1,ind._2)*n)).toInt})
+  }
+*/
+  private def oneStepTransformation( t : MatrixLight[Int],vp : MatrixLight[Double], up : MatrixLight[Double]): MatrixLight[Int] ={
+    val nbPoints = t.sum
+    val tp = t.proportional
+ // points to remove
+// val tu = DistanceUtils.dotProduct(tp,up)
+  //  val rm = DistanceUtils.dotProduct(tu,cv)
+    // addPoints :  cT , cU , V
+   val consideredSetAdd = vp.indices.diff(t.indices.intersect(up.indices))
+     val add = new MatrixLight[Double](t.nbRow,t.nbCol)
+    val setAdd =  restrictToConnectedCells(t,consideredSetAdd.toSet)
+    setAdd.foreach{ case (i,j) => add.assign(i,j,(1-tp(i,j))*(1-up(i,j))*vp(i,j)  )  }
+    // Reinforce :  T , cU , V
+    val consideredSetReInf = vp.indices.intersect(t.indices).diff(up.indices)
+    val reinf = new MatrixLight[Double](t.nbRow,t.nbCol)
+    consideredSetReInf.foreach{ case (i,j) => reinf.assign(i,j,tp(i,j)*(1-up(i,j))*vp(i,j)  )  }
+    //val npts = nbPoints/(t.nbRow)
+  //  val npts = nbPoints / 1000
+  val npts =  math.max(nbPoints / 500,50)
+    //var tprime = addPoints(t,add, npts )
+
+    //tprime =  rmPoints(tprime,rm, npts )
+    var  tprime = addPoints(t,add, npts)
+ //    tprime =  addPoints(tprime,reinf, npts )
+    //tprime = rmPoints(tprime,rm, npts )
+  //  tprime = addPoints(tprime,add, npts)
+    val out = matrixToInt(tprime.proportional,nbPoints)
+    out
+  }
+
+  private def restrictToConnectedCells(t : MatrixLight[Int],inCells : Set[(Int,Int)]) = {
+   var noneEmptyCells = t.indices.toSet
+    var outCells = Set[(Int,Int)]()
+    var stop = false
+    while(!stop){
+      stop = true
+      inCells.foreach{p =>
+        if(!noneEmptyCells.contains(p) && isConnected(noneEmptyCells,p)) {
+          noneEmptyCells = noneEmptyCells + p
+          outCells = outCells + p
+          stop = false
+        }
+      }
+    }
+    outCells
+  }
+
+  private def isConnected(noneEmptyCells : Set[(Int,Int)], p : (Int,Int)) : Boolean = {
+
+    val s = Seq(-1,0,1).flatMap(x => Seq(-1,0,1).map(y => (x,y))).filter( x => x._1!=0 || x._2!=0)
+    for( d <- s){
+      val (i,j) = (p._1 + d._1,p._2 + d._2)
+      if (noneEmptyCells.contains((i,j))) return true
+    }
+    false
+  }
+  /*
+  private def isConnected(t : MatrixLight[Int] , p : (Int,Int)) : Boolean = {
+
+    val s = Seq(-1,0,1).flatMap(x => Seq(-1,0,1).map(y => (x,y))).filter( x => x._1!=0 || x._2!=0)
+    for( d <- s){
+      val (i,j) = (p._1 + d._1,p._2 + d._2)
+      if ((i < t.nbRow || j < t.nbCol || i >= 0 || j >= 0) && t(i,j)!=0) return true
+    }
+    false
+  }
+*/
+  private def addPoints( t : MatrixLight[Int],add : MatrixLight[Double], n : Int) : MatrixLight[Int] = {
+    val sum = add.sum
+  // val out =  t.transform{ ( ind : (Int,Int),v : Int )=> v + math.floor(add(ind._1,ind._2)*n/sum).toInt}
+  val out =  add.foreachNoneEmpty{case (ind : (Int,Int), add_value : Double ) =>
+    //val rnd = randomGenerator.nextDouble()
+   // if(rnd < add(ind._1,ind._2)) println(s"TRUE $ind :  $rnd < ${add(ind._1,ind._2)}")
+    //val  newValue = math.max(0,v  + (if(rnd< add(ind._1,ind._2)) n else 0))
+    val  newValue = math.max(0, t(ind._1,ind._2)  + (add_value*n/sum).toInt)
+    if(newValue > 0 ) t.assign(ind._1,ind._2,newValue)
+  }
+    t
+  }
+  private def rmPoints( t : MatrixLight[Int], rm : MatrixLight[Double], n : Int) : MatrixLight[Int] = {
+    val sum = rm.sum
+   // val out = t.transform{ ( ind : (Int,Int),v : Int )=> math.max(0,v - math.floor(rm(ind._1,ind._2)*n/sum)).toInt}
+  // val out =  t.transform{ ( ind : (Int,Int),v : Int )=> math.max(0,v  - (if(scala.util.Random.nextDouble()< rm(ind._1,ind._2)) n else 0))}
+  val out =  t.foreach{case (ind : (Int,Int),v : Int ) =>
+   val  newValue = math.max(0,v  - (if((new Random()).nextDouble()< rm(ind._1,ind._2)) n else 0))
+      if(newValue > 0 ) t.assign(ind._1,ind._2,newValue)
+      else t.data.remove(ind)
+  }
+   t
+  }
+
+
+
+  private def matrixToInt(m : MatrixLight[Double], multiplicator : Int) : MatrixLight[Int] = {
+    val newMat = new MatrixLight[Int](m.nbRow, m.nbCol)
+    m.data.foreach {
+      case ((i, j), value) =>
+        newMat.assign(i, j, math.floor(value*multiplicator).toInt)
+    }
+    newMat
+  }
+
+  private def bestMatch(user : String , mat_k : MatrixLight[Int], train : immutable.Map[String,MatrixLight[Int]], distanceType : Int) : (String,  String) = {
+    var  dists = immutable.Map[String,Double]()
+    var  fscores = immutable.Map[String,Double]()
+
+    train.par.foreach{
+      case (u, mat_u) =>
+        synchronized{
+          dists += u -> DistanceUtils.d(mat_k.proportional,mat_u.proportional,distanceType)
+         fscores += u ->  areaCoverage((user,mat_k),(u,mat_u))._2._3
+        }
+    }
+    val distV = dists.toSeq.sortBy(_._2).head
+    val tmp = fscores.toSeq.sortBy(_._2).reverse.head
+
+    val fscoreV = if(tmp._1 == user) fscores.toSeq.sortBy(_._2).reverse.tail.head else tmp
+    (distV._1,fscoreV._1)
+  }
+
+  private def areaCoverage(ref: (String,MatrixLight[Int]), res: (String,MatrixLight[Int])) = {
+    val refCells = ref._2.indices
+    val resCells = res._2.indices
+    val matched = resCells.intersect(refCells).size
+    (ref._1, (MetricUtils.precision(resCells.size, matched), MetricUtils.recall(refCells.size, matched), MetricUtils.fscore(refCells.size, resCells.size, matched)))
+  }
+
+
+  private def areaCoverageUnknown(ref:MatrixLight[Int], res: MatrixLight[Int]) = {
+    val refCells = ref.indices
+    val resCells = res.indices
+    val matched = resCells.intersect(refCells).size
+    (MetricUtils.precision(resCells.size, matched), MetricUtils.recall(refCells.size, matched), MetricUtils.fscore(refCells.size, resCells.size, matched))
+  }
+
+
+  def computeMatricesSize(p1 : Point  , p2 : Point  , cellSize: Distance): (Int, Int, Point) = {
+    val topCornerleft = Point(math.min(p1.x, p2.x), math.max(p1.y, p2.y))
+    //val topCornerRight = Point(math.max(p1.x, p2.x), math.max(p1.y, p2.y))
+    val bottomCornerleft = Point(math.min(p1.x, p2.x), math.min(p1.y, p2.y))
+    val bottomCornerRight = Point(math.max(p1.x, p2.x), math.min(p1.y, p2.y))
+    val width = bottomCornerleft.distance(bottomCornerRight)
+    // println(s"Width = $width")
+    val height = topCornerleft.distance(bottomCornerleft)
+    // println(s"Height = $height")
+    val nbRows = math.ceil(height / cellSize).toInt
+    val nbColumn = math.ceil(width / cellSize).toInt
+    (nbRows, nbColumn, bottomCornerleft)
+  }
+
+  def formSingleMatrices(ds: DataFrame[Trace], dimensions: (Int, Int, Point), cellSize: Distance): immutable.Map[String, MatrixLight[Int]] = {
+
+    var outputMap: scala.collection.immutable.Map[String, MatrixLight[Int]] = scala.collection.immutable.Map[String, MatrixLight[Int]]().empty
+    ds.foreach{ t =>
+      synchronized(outputMap += (t.user -> new MatrixLight[Int](dimensions._1, dimensions._2)))
+     // println(t.user)
+    }
+    ds.foreach {
+      t =>
+        val l = t.events.length
+        if (l != 0) {
+          t.events.last.time
+          val start_trace = t.events.head.time
+          val user = t.user
+          val events = t.events
+          events.foreach { e =>
+            val p = e.point
+            val j = math.floor((p.x - dimensions._3.x) / cellSize.meters).toInt
+            val i = math.floor((p.y - dimensions._3.y) / cellSize.meters).toInt
+            val mat = outputMap(user)
+            mat.inc(i, j)
+            outputMap += (user -> mat)
+          }
+        }else{
+          outputMap  -= t.user
+        }
+    }
+    outputMap
+  }
+
+  def statsAreaCoverage(trainMats: immutable.Map[String, MatrixLight[Int]], testMats: immutable.Map[String, MatrixLight[Int]], n: Int): (Double, immutable.Map[String, String]) = {
+    // printMatrixCsvfile(testMats)
+
+
+    var stats: immutable.Map[String, String] = immutable.Map[String, String]()
+    var nbMatches: Int = 0
+
+    testMats.par.foreach {
+      case (k: String, mat_k: MatrixLight[Int]) =>
+        var order = immutable.Map[String, Double]()
+        var areaCovInfo = immutable.Map[String, String]()
+        trainMats.foreach {
+          case (u: String, mat_u: MatrixLight[Int]) =>
+            val dist = DistanceUtils.d(mat_k.proportional, mat_u.proportional, n)
+            val ac = areaCoverage((k,mat_k),(u,mat_u))
+            order += (u -> dist)
+            areaCovInfo += (u -> (ac._2._1.toString +"=" +ac._2._2.toString + "=" + ac._2._3.toString  ))
+        }
+        val seq = order.toSeq.sortBy(_._2)
+
+        synchronized{
+          seq.foreach{
+            case (u,dist) =>
+              val users = k+"_"+u
+              val info = dist + "=" + areaCovInfo.getOrElse(u,"#")
+              stats += ( users -> info )
+          }
+        }
+
+        if (k == seq.head._1) nbMatches += 1
+    }
+
+    val rate: Double = nbMatches.toDouble / testMats.keys.size.toDouble
+    (rate, stats)
+  }
+
+  def time[R](block: => R): R = {
+    val t0 = System.nanoTime()
+    val result = block    // call-by-name
+    val t1 = System.nanoTime()
+    println("Elapsed time: " + (t1 - t0)/1000000 + "ms")
+    result
+  }
+
+  def reIdent(trainMats: immutable.Map[String, MatrixLight[Int]], testMats: immutable.Map[String, MatrixLight[Int]], n: Int): (Double, immutable.Map[String, String]) = {
+    // printMatrixCsvfile(testMats)
+
+
+    var matches: scala.collection.immutable.Map[String, String] = scala.collection.immutable.Map[String, String]()
+    var nbMatches: Int = 0
+
+
+    testMats.par.foreach {
+      //testMats.foreach {
+      case (k: String, mat_k: MatrixLight[Int]) =>
+        var order = immutable.Map[String, Double]()
+        val l = trainMats.keys.size
+        trainMats.foreach {
+          case (u: String, mat_u: MatrixLight[Int]) =>
+            val dist =  DistanceUtils.d(mat_k.proportional, mat_u.proportional, n)
+            order += (u -> dist)
+        }
+        val seq = order.toSeq.sortBy(_._2)
+
+        //  println(s" - element $k  trainsMat length =  $l")
+
+        synchronized(matches += (k -> seq.head._1))
+        if (k == seq.head._1) nbMatches += 1
+    }
+    val rate: Double = nbMatches.toDouble / testMats.keys.size.toDouble
+    (rate, matches)
+  }
+}
+
+
+
+
+case class HeatMapConfusionIn(
+                                 @Arg(help = "Train dataset") train: Dataset,
+                                 @Arg(help = "Test dataset") test: Dataset,
+                                 @Arg(help = "Cell Size in meters") cellSize: Distance,
+                                 @Arg(help = "Type of distance metrics between matrices (default : Topsoe") distanceType: Int = -51,
+                                 @Arg(help = "Number of iteration without improvement") itmax: Int = 500,
+
+                                 @Arg(help = "Lower point latitude")
+                                   lat1: Double =  -61.0 ,
+                                 @Arg(help = "Lower point longitude")
+                                 lng1: Double = -131 ,
+                                 @Arg(help = "Higher point latitude (override diag & angle)")
+                                 lat2: Double = 80,
+                                 @Arg(help = "Higher point latitude (override diag & angle)")
+                                 lng2: Double = 171
+                               )
+
+case class HeatMapConfusionOut(
+                                @Arg(help = "statistics  id -> Ut(T, new T ) , Minimum Utility , changed ") precision: Map[String, String],
+                                @Arg(help = "Average utility of dataset") avgAC: Double,
+                                @Arg(help = "Matching re-identificaition") matches: Map[String, String],
+                                @Arg(help = "Protected dataset") out: Dataset
+                              )
+
