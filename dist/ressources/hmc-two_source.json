@@ -1,0 +1,67 @@
+ 
+{
+  "name": "A",
+  "owner": "MoMa <mohamed.maouche@insa-lyon.fr",
+  "graph": [
+ {
+      "op": "EventSource",
+      "name": "EventSourceKD",
+      "inputs": {
+        "url": {
+          "param": "urlKD",
+          "default_value": "/data/cabSpotting"
+        },
+        "kind": {
+          "value": "csv"
+        }
+      }
+    },
+    {
+      "op": "EventSource",
+      "name": "EventSourceUD",
+      "inputs": {
+        "url": {
+          "param": "urlUD",
+          "default_value": "/data/cabSpotting"
+        },
+        "kind": {
+          "value": "csv"
+        }
+      }
+    },   
+    
+         {
+      "op": "HMConfusion",
+      "name" : "HMConfusion",
+      "inputs": {
+        "train": {
+          "reference": "EventSourceKD/data"
+        },
+        "test": {
+          "reference": "EventSourceUD/data"
+        },
+        "distanceType": {"param": "distanceType" ,
+                    "default_value" : -51
+                    },
+        "cellSize": {"param": "cellSize" ,
+                    "default_value" : "800.meters"
+                    }  ,
+        "minGap": {"param": "minGap" ,
+                    "default_value" : "15.minutes"
+                    }  ,
+        "fminGap": {"param": "fminGap" ,
+                    "default_value" : "0.minutes"
+               } ,
+        "politic": {"param": "politic" ,
+                    "default_value" : "REINF"
+                    },
+        "minTime1km": {"param": "minTime1km" ,
+                    "default_value" : "18.seconds"
+                }  ,
+        "lat2": {"value": "80"},
+        "lng2": {"value": "171"}
+      }
+    }
+  ]
+}
+

@@ -1,0 +1,137 @@
+ 
+{
+  "name": "A",
+  "owner": "MoMa <mohamed.maouche@insa-lyon.fr",
+  "graph": [
+    {
+      "op": "EventSource",
+      "inputs": {
+            "url" : {"param": "url" ,
+                    "default_value" : "/home/mmaouche/IntelliJ-Projects/location-privacy/data/30days/geolife-tree-30days/20/"
+                    },
+        "kind": {"value": "csv"}
+      }
+    },
+    
+
+     {
+      "op": "SelectPortionSplitting",
+      "name" : "SelectPortionSplittingtrain",
+      "inputs": {
+        "data": {"reference": "EventSource/data"},
+        "start": {"param": "startTrain" ,
+                    "default_value" : 0.0
+                    },
+        "end": {"param": "endTrain" ,
+                    "default_value" : 0.5
+                    }
+      }
+    },
+     {
+      "op": "SelectPortionSplitting",
+      "name" : "SelectPortionSplittingtest",
+      "inputs": {
+        "data": {"reference": "EventSource/data"},
+        "start": {"param": "startTest" ,
+                    "default_value" : 0.5
+                    },
+        "end": {"param": "endTest" ,
+                    "default_value" : 1
+                    }
+      }
+    },  
+
+         {
+      "op": "HMConfusion",
+      "name" : "HMConfusion",
+      "inputs": {
+        "train": {"reference": "SelectPortionSplittingtrain/output"},
+        "test": {"reference": "SelectPortionSplittingtest/output"},
+        "distanceType": {"param": "distanceType" ,
+                    "default_value" : -51
+                    },
+        "cellSize": {"param": "cellSize" ,
+                    "default_value" : "200.meters"
+                    }  ,
+        "minGap": {"param": "minGap" ,
+                    "default_value" : "15.minutes"
+                    }  ,
+        "fminGap": {"param": "fminGap" ,
+                    "default_value" : "0.minutes"
+               } ,
+        "politic": {"param": "politic" ,
+                    "default_value" : "REINF"
+                    },
+        "minTime1km": {"param": "minTime1km" ,
+                    "default_value" : "18.seconds"
+                }  ,
+        "lat2": {"value": "80"},
+        "lng2": {"value": "171"}
+      }
+    },    
+         {
+      "op": "MatMatching",
+      "name" : "AP-Attack",
+      "inputs": {
+        "train": {"reference": "SelectPortionSplittingtrain/output"},
+        "test": {"reference": "HMConfusion/out"},
+        "distanceType": {"param": "distanceType" ,
+                    "default_value" : -51
+                    },
+        "cellSize": {"param": "cellSizeAP" ,
+                    "default_value" : "800.meters"
+                    },
+                            "matrixType": {"param": "matrixType" ,
+                    "default_value" : "full"
+                    },
+        "lat2": {"value": "80"},
+        "lng2": {"value": "171"}
+      }
+    }   ,
+
+     {
+      "op": "PoisReident",
+      "name" : "POI-Attack",
+      "inputs": {
+        "diameter": {"value": "200.meters"},
+        "duration": {"value": "1.hours"},
+        "train": {"reference": "SelectPortionSplittingtrain/output"},
+        "test": {"reference": "HMConfusion/out"}
+      }
+    } ,
+     {
+      "op": "MMCReIdent",
+      "name" : "PIT-Attack",
+      "inputs": {
+        "diameter": {"value": "200.meters"},
+        "duration": {"value": "1.hours"},
+        "train": {"reference": "SelectPortionSplittingtrain/output"},
+        "test": {"reference": "HMConfusion/out"}
+      }
+    } ,
+             {
+      "op": "AreaCoverageMatrix",
+      "name" : "AreaCoverage",
+      "inputs": {
+        "train": {"reference": "SelectPortionSplittingtest/output"},
+        "test": {"reference": "HMConfusion/out"},
+        "cellSize": {"param": "cellSizeAC" ,
+                    "default_value" : "800.meters"
+                    }
+
+      }
+    } 
+,
+
+{
+      "op": "SpatialDistortion",
+      "name":"SpatialDistortion",
+      "inputs": {
+        "train": {"reference": "SelectPortionSplittingtest/output"},
+        "test": {"reference": "HMConfusion/out"},      
+         "interpolate": {"value": "true"}
+      }
+    }
+  ]
+}
+

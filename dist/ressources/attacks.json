@@ -1,0 +1,87 @@
+ 
+{
+  "name": "A",
+  "owner": "MoMa <mohamed.maouche@insa-lyon.fr",
+  "graph": [
+ {
+      "op": "EventSource",
+      "name": "EventSourceKD",
+      "inputs": {
+        "url": {
+          "param": "urlKD",
+          "default_value": "/data/cabSpotting"
+        },
+        "kind": {
+          "value": "csv"
+        }
+      }
+    },
+    {
+      "op": "EventSource",
+      "name": "EventSourceUD",
+      "inputs": {
+        "url": {
+          "param": "urlUD",
+          "default_value": "/data/cabSpotting"
+        },
+        "kind": {
+          "value": "csv"
+        }
+      }
+    },   
+
+         {
+      "op": "MatMatching",
+      "name" : "AP-Attack",
+      "inputs": {
+        "train": {
+          "reference": "EventSourceKD/data"
+        },
+        "test": {
+          "reference": "EventSourceUD/data"
+        },
+        "distanceType": {"param": "distanceType" ,
+                    "default_value" : -51
+                    },
+        "cellSize": {"param": "cellSizeAP" ,
+                    "default_value" : "800.meters"
+                    },
+                            "matrixType": {"param": "matrixType" ,
+                    "default_value" : "full"
+                    },
+        "lat2": {"value": "80"},
+        "lng2": {"value": "171"}
+      }
+    }   ,
+
+     {
+      "op": "PoisReident",
+      "name" : "POI-Attack",
+      "inputs": {
+        "diameter": {"value": "200.meters"},
+        "duration": {"value": "1.hours"},
+        "train": {
+          "reference": "EventSourceKD/data"
+        },
+        "test": {
+          "reference": "EventSourceUD/data"
+        }
+      }
+    } ,
+     {
+      "op": "MMCReIdent",
+      "name" : "PIT-Attack",
+      "inputs": {
+        "diameter": {"value": "200.meters"},
+        "duration": {"value": "1.hours"},
+        "train": {
+          "reference": "EventSourceKD/data"
+        },
+        "test": {
+          "reference": "EventSourceUD/data"
+        }
+      }
+    } 
+  ]
+}
+
