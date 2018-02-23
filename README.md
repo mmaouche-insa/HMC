@@ -12,9 +12,13 @@ This toolkit is a wrap of bigger project [Accio](https://privamov.github.io/acci
 
 ## Mobility Dataset Format 
 One dataset = One directory of mobility traces.
+
 One mobility trace of user =  One CSV file named <user_id>.csv
+
 CSV file format =  Each line is a record of the mobility trace. 
+
 One record =  <lattitude>,<longitude>,<timestamp>
+
 Timestamp = [Unix time POSIX](https://linux.die.net/man/2/time)   .
 
 
