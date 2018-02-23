@@ -17,7 +17,7 @@ One mobility trace of user =  One CSV file named <user_id>.csv
 
 CSV file format =  Each line is a record of the mobility trace. 
 
-One record =  <lattitude>,<longitude>,<timestamp>
+One record =  \<lattitude\>,\<longitude>,\<timestamp\>
 
 Timestamp = [Unix time POSIX](https://linux.die.net/man/2/time)   .
 
